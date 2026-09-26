@@ -28,6 +28,12 @@ fabricApi {
 	}
 }
 
+// Loom makes `test` (and so `build`) depend on runGameTest. Only run the game
+// tests when they are requested explicitly: ./gradlew runGameTest
+tasks.matching { it.name == 'runGameTest' }.configureEach {
+	onlyIf { gradle.startParameter.taskNames.any { it == 'runGameTest' || it.endsWith(':runGameTest') } }
+}
+
 processResources {
 	def version = project.version
 	inputs.property "version", version

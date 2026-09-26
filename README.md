@@ -34,7 +34,7 @@ Fabric 模组：普通砂岩（`minecraft:sandstone`）上的铁轨使用动能�
 
 ```powershell
 .\gradlew.bat build
-.\gradlew.bat runGameTest
+.\gradlew.bat runGameTest   # 游戏测试需单独运行，build 不会运行
 ```
 
 Gradle 9.6.0、Loom 1.17.21、Fabric API 0.161.0+26.3。
