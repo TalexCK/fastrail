@@ -47,9 +47,9 @@ public class CurveMovementGameTest {
             for (Direction heading : Direction.Plane.HORIZONTAL) {
                 for (double speed : new double[]{0.12D, 0.4D}) {
                     buildJunction(level, origin, curve, Blocks.STONE);
-                    Vec3[][] stone = traceJunction(level, origin, heading, speed);
+                    Vec3[][] stone = traceJunction(level, origin, heading, speed, true);
                     buildJunction(level, origin, curve, Blocks.COBBLESTONE);
-                    Vec3[][] cobble = traceJunction(level, origin, heading, speed);
+                    Vec3[][] cobble = traceJunction(level, origin, heading, speed, true);
                     String context = curve + "/" + heading + "/" + speed;
                     require(stone.length == cobble.length, "Ordinary rail timing changed: " + context);
                     for (int tick = 0; tick < stone.length; tick++) {
@@ -72,9 +72,9 @@ public class CurveMovementGameTest {
             for (Direction heading : Direction.Plane.HORIZONTAL) {
                 for (double speed : new double[]{0.12D, 0.4D}) {
                     buildJunction(level, origin, curve, Blocks.STONE);
-                    Vec3[][] vanilla = traceJunction(level, origin, heading, speed);
+                    Vec3[][] vanilla = traceJunction(level, origin, heading, speed, true);
                     buildJunction(level, origin, curve, Blocks.SANDSTONE);
-                    Vec3[][] sandstone = traceJunction(level, origin, heading, speed);
+                    Vec3[][] sandstone = traceJunction(level, origin, heading, speed, false);
                     require(exitSide(origin, vanilla) == exitSide(origin, sandstone),
                             "Junction route changed: " + curve + "/" + heading + "/" + speed);
                 }
@@ -240,6 +240,37 @@ public class CurveMovementGameTest {
     }
 
     @GameTest
+    public void ordinaryRailsNeverSpeedUpABoostedCart(GameTestHelper helper) {
+        ServerLevel level = helper.getLevel();
+        BlockPos origin = helper.absolutePos(new BlockPos(4, 20, 4));
+        List<Cell> track = new ArrayList<>();
+        BlockPos pos = addStraight(track, origin, Direction.EAST, BOOSTERS, Blocks.SANDSTONE,
+                poweredRail(Direction.EAST, true));
+        int cobbleX = pos.getX();
+        pos = addStraight(track, pos, Direction.EAST, 120, Blocks.COBBLESTONE, poweredRail(Direction.EAST, true));
+        addStraight(track, pos, Direction.EAST, 60, Blocks.COBBLESTONE, plainRail(Direction.EAST));
+        build(level, track);
+
+        Minecart cart = cart(helper, level, track.get(0).pos(), Direction.EAST, 0.1D, false);
+        for (int tick = 0; tick < 100 && cart.getX() < cobbleX + 1; tick++) {
+            cart.tick();
+        }
+        require(boosted(cart), "Cart left the sandstone boosters without being boosted");
+        boolean handedBack = false;
+        for (int tick = 0; tick < 200 && !handedBack; tick++) {
+            double before = speed(cart);
+            cart.tick();
+            requireOnRail(level, cart, "ordinary powered rails");
+            handedBack = !boosted(cart);
+            require(handedBack || speed(cart) <= before + 1.0E-9D,
+                    "Ordinary powered rail sped up a boosted cart: " + before + " -> " + speed(cart));
+        }
+        require(handedBack, "Boosted cart never returned to vanilla on ordinary powered rails");
+        cart.discard();
+        helper.succeed();
+    }
+
+    @GameTest
     public void inactivePoweredSandstoneBrakesHard(GameTestHelper helper) {
         ServerLevel level = helper.getLevel();
         BlockPos origin = helper.absolutePos(new BlockPos(4, 20, 4));
@@ -309,7 +340,8 @@ public class CurveMovementGameTest {
 
     // ---------------------------------------------------------------- helpers
 
-    private static Vec3[][] traceJunction(ServerLevel level, BlockPos origin, Direction heading, double speed) {
+    private static Vec3[][] traceJunction(ServerLevel level, BlockPos origin, Direction heading, double speed,
+                                          boolean requireVanilla) {
         Minecart cart = new Minecart(EntityTypes.MINECART, level);
         cart.setPos(origin.getX() + 0.5D - heading.getStepX() * 1.25D,
                 origin.getY() + 0.1D,
@@ -322,6 +354,7 @@ public class CurveMovementGameTest {
             cart.tick();
             samples.add(new Vec3[]{cart.position(), cart.getDeltaMovement()});
             requireOnRail(level, cart, "junction " + heading);
+            require(!requireVanilla || !boosted(cart), "Mod took over a cart on ordinary rails");
             reachedCurve |= (cart.getX() - center.x) * heading.getStepX()
                     + (cart.getZ() - center.z) * heading.getStepZ() > -0.7D;
             double distance = Math.max(Math.abs(cart.getX() - center.x), Math.abs(cart.getZ() - center.z));

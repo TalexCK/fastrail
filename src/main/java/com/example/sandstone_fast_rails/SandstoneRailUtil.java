@@ -33,12 +33,6 @@ public final class SandstoneRailUtil {
     /** Energy added per block travelled on an active powered rail on sandstone. */
     public static final double SANDSTONE_POWERED_RAIL_ENERGY = 0.5D;
 
-    /**
-     * Energy added per block travelled on an active powered rail elsewhere.
-     * Vanilla adds 0.06 speed per tick; dE/dx = acceleration, so 0.06 per block.
-     */
-    public static final double POWERED_RAIL_ENERGY = 0.06D;
-
     /** Speed kept per block travelled on an inactive powered rail on sandstone. */
     public static final double SANDSTONE_BRAKE_RETENTION = 0.1D;
 

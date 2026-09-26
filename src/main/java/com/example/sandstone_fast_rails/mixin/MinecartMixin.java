@@ -28,7 +28,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * rails brake. Turning never costs energy.
  *
  * After leaving sandstone the cart keeps its energy and slows with vanilla
- * friction, then hands back to vanilla once it is at vanilla speed.
+ * friction (ordinary rails never speed it up), then hands back to vanilla
+ * once it is at vanilla speed. Carts that are not boosted are never touched.
  */
 @Mixin(Minecart.class)
 public abstract class MinecartMixin implements FastRailCart {
@@ -42,8 +43,8 @@ public abstract class MinecartMixin implements FastRailCart {
     @Unique private BlockPos sandstoneFastRails$headRail;
     @Unique private double sandstoneFastRails$headSpeed;
 
+    @Unique private double sandstoneFastRails$sandstoneDistance;
     @Unique private double sandstoneFastRails$sandstonePoweredDistance;
-    @Unique private double sandstoneFastRails$poweredDistance;
     @Unique private double sandstoneFastRails$sandstoneBrakeDistance;
     @Unique private double sandstoneFastRails$brakeDistance;
 
@@ -134,8 +135,8 @@ public abstract class MinecartMixin implements FastRailCart {
             direction = SandstoneRailUtil.horizontalDirection(sandstoneFastRails$headMovement);
         }
 
+        sandstoneFastRails$sandstoneDistance = 0.0D;
         sandstoneFastRails$sandstonePoweredDistance = 0.0D;
-        sandstoneFastRails$poweredDistance = 0.0D;
         sandstoneFastRails$sandstoneBrakeDistance = 0.0D;
         sandstoneFastRails$brakeDistance = 0.0D;
         sandstoneFastRails$recordDistance(level, sandstoneFastRails$headRail, moved);
@@ -223,7 +224,6 @@ public abstract class MinecartMixin implements FastRailCart {
                                                 Vec3 vanillaMovement, double factor) {
         double energy = 0.5D * headSpeed * headSpeed;
         energy += sandstoneFastRails$sandstonePoweredDistance * SandstoneRailUtil.SANDSTONE_POWERED_RAIL_ENERGY;
-        energy += sandstoneFastRails$poweredDistance * SandstoneRailUtil.POWERED_RAIL_ENERGY;
         energy -= SandstoneRailUtil.GRAVITY * (cart.getY() - sandstoneFastRails$headPos.y);
         double speed = energy > 0.0D ? Math.sqrt(2.0D * energy) : 0.0D;
 
@@ -249,6 +249,12 @@ public abstract class MinecartMixin implements FastRailCart {
             speed = Math.max(speed, SandstoneRailUtil.horizontalLength(vanillaMovement) * factor);
         }
 
+        // Ordinary rails (powered rails, downhill) never speed up a boosted
+        // cart: above vanilla speed it only slows down until vanilla takes over.
+        if (sandstoneFastRails$sandstoneDistance <= 0.0D) {
+            speed = Math.min(speed, headSpeed);
+        }
+
         speed = Math.min(speed, SandstoneRailUtil.MAX_SPEED);
         return speed < SandstoneRailUtil.STOP_SPEED ? 0.0D : speed;
     }
@@ -261,11 +267,12 @@ public abstract class MinecartMixin implements FastRailCart {
         }
         BlockState state = level.getBlockState(rail);
         boolean sandstone = SandstoneRailUtil.isFastRailAt(level, rail);
+        if (sandstone) {
+            sandstoneFastRails$sandstoneDistance += distance;
+        }
         if (SandstoneRailUtil.isActivePoweredRail(state)) {
             if (sandstone) {
                 sandstoneFastRails$sandstonePoweredDistance += distance;
-            } else {
-                sandstoneFastRails$poweredDistance += distance;
             }
         } else if (SandstoneRailUtil.isInactivePoweredRail(state)) {
             if (sandstone) {
