@@ -1,0 +1,15 @@
+{
+	"required": true,
+	"package": "com.example.sandstone_fast_rails.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"mixins": [
+		"MinecartMixin",
+        "MinecartFrictionMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}
+
+
+

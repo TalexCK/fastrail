@@ -1,0 +1,28 @@
+{
+	"schemaVersion": 1,
+	"id": "sandstone_fast_rails",
+	"version": "${version}",
+	"name": "Sandstone Fast Rails",
+	"description": "Minecarts accelerate on sandstone rails, with low-friction curves, vanilla routing, and vanilla friction while coasting onto other support blocks.",
+	"authors": [
+		"You"
+	],
+	"contact": {},
+	"license": "MIT",
+	"icon": "assets/sandstone_fast_rails/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"com.example.sandstone_fast_rails.SandstoneFastRailsMod"
+		]
+	},
+	"mixins": [
+		"sandstone_fast_rails.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}
