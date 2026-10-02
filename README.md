@@ -42,7 +42,7 @@ Gradle 9.6.0、Loom 1.17.21、Fabric API 0.161.0+26.3。
 
 ## GitHub Actions
 
-每次 push、Pull Request 或手动触发时，`.github/workflows/build.yml` 用 Java 25 运行 `./gradlew build`，并把 `build/libs` 中的 JAR 作为构建产物上传（不运行游戏测试）。
+每次 push 到 master、Pull Request 或手动触发时，`.github/workflows/build.yml` 用 Java 25 运行 `./gradlew build`，并把 `build/libs` 中的 JAR 作为构建产物上传（不运行游戏测试）。
 
 ## License
 
