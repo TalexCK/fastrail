@@ -29,7 +29,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  *
  * After leaving sandstone the cart keeps its energy and slows with vanilla
  * friction (ordinary rails never speed it up), then hands back to vanilla
- * once it is at vanilla speed. Carts that are not boosted are never touched.
+ * once it is at vanilla speed. Ordinary active powered rails slow it to vanilla
+ * powered-rail speed within a few blocks; ordinary inactive powered rails brake
+ * it more gently than sandstone ones. Carts that are not boosted are never touched.
  */
 @Mixin(Minecart.class)
 public abstract class MinecartMixin implements FastRailCart {
@@ -45,6 +47,7 @@ public abstract class MinecartMixin implements FastRailCart {
 
     @Unique private double sandstoneFastRails$sandstoneDistance;
     @Unique private double sandstoneFastRails$sandstonePoweredDistance;
+    @Unique private double sandstoneFastRails$poweredDistance;
     @Unique private double sandstoneFastRails$sandstoneBrakeDistance;
     @Unique private double sandstoneFastRails$brakeDistance;
 
@@ -137,6 +140,7 @@ public abstract class MinecartMixin implements FastRailCart {
 
         sandstoneFastRails$sandstoneDistance = 0.0D;
         sandstoneFastRails$sandstonePoweredDistance = 0.0D;
+        sandstoneFastRails$poweredDistance = 0.0D;
         sandstoneFastRails$sandstoneBrakeDistance = 0.0D;
         sandstoneFastRails$brakeDistance = 0.0D;
         sandstoneFastRails$recordDistance(level, sandstoneFastRails$headRail, moved);
@@ -229,18 +233,32 @@ public abstract class MinecartMixin implements FastRailCart {
 
         speed *= cart.getBehavior().getSlowdownFactor();
 
-        BlockState headState = level.getBlockState(sandstoneFastRails$headRail);
-        boolean headOnBrake = SandstoneRailUtil.isInactivePoweredRail(headState);
-        boolean braked = headOnBrake
-                || sandstoneFastRails$sandstoneBrakeDistance > 0.0D
-                || sandstoneFastRails$brakeDistance > 0.0D;
+        // Sandstone brake: strong, per block and per tick.
+        BlockPos headRail = sandstoneFastRails$headRail;
+        boolean headOnSandstoneBrake = SandstoneRailUtil.isInactivePoweredRail(level.getBlockState(headRail))
+                && SandstoneRailUtil.isFastRailAt(level, headRail);
         speed *= Math.pow(SandstoneRailUtil.SANDSTONE_BRAKE_RETENTION, sandstoneFastRails$sandstoneBrakeDistance);
-        speed *= Math.pow(SandstoneRailUtil.BRAKE_RETENTION, sandstoneFastRails$brakeDistance);
-        if (headOnBrake) {
-            speed *= SandstoneRailUtil.BRAKE_TICK_RETENTION;
+        if (headOnSandstoneBrake) {
+            speed *= SandstoneRailUtil.SANDSTONE_BRAKE_TICK_RETENTION;
         }
-        if (braked && speed < SandstoneRailUtil.BRAKE_STOP_SPEED) {
+        if ((headOnSandstoneBrake || sandstoneFastRails$sandstoneBrakeDistance > 0.0D)
+                && speed < SandstoneRailUtil.SANDSTONE_BRAKE_STOP_SPEED) {
             return 0.0D;
+        }
+
+        // Ordinary brake on a boosted cart: milder, per block only. At vanilla
+        // speed the cart is handed back and vanilla's own brake applies.
+        speed *= Math.pow(SandstoneRailUtil.BRAKE_RETENTION, sandstoneFastRails$brakeDistance);
+        if (sandstoneFastRails$brakeDistance > 0.0D && speed < SandstoneRailUtil.BRAKE_STOP_SPEED) {
+            return 0.0D;
+        }
+
+        // Ordinary active powered rail: slow an over-speed cart down to vanilla
+        // powered-rail speed, never below it.
+        double vanillaSpeed = SandstoneRailUtil.VANILLA_MAX_STEP * factor;
+        if (sandstoneFastRails$poweredDistance > 0.0D && speed > vanillaSpeed) {
+            speed = Math.max(vanillaSpeed, speed
+                    * Math.pow(SandstoneRailUtil.POWERED_RAIL_OVERSPEED_RETENTION, sandstoneFastRails$poweredDistance));
         }
 
         // From (almost) rest, keep vanilla's start-up impulses: player input,
@@ -273,6 +291,8 @@ public abstract class MinecartMixin implements FastRailCart {
         if (SandstoneRailUtil.isActivePoweredRail(state)) {
             if (sandstone) {
                 sandstoneFastRails$sandstonePoweredDistance += distance;
+            } else {
+                sandstoneFastRails$poweredDistance += distance;
             }
         } else if (SandstoneRailUtil.isInactivePoweredRail(state)) {
             if (sandstone) {

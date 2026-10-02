@@ -240,7 +240,7 @@ public class CurveMovementGameTest {
     }
 
     @GameTest
-    public void ordinaryRailsNeverSpeedUpABoostedCart(GameTestHelper helper) {
+    public void ordinaryPoweredRailsSlowABoostedCartToVanillaSpeed(GameTestHelper helper) {
         ServerLevel level = helper.getLevel();
         BlockPos origin = helper.absolutePos(new BlockPos(4, 20, 4));
         List<Cell> track = new ArrayList<>();
@@ -266,34 +266,51 @@ public class CurveMovementGameTest {
                     "Ordinary powered rail sped up a boosted cart: " + before + " -> " + speed(cart));
         }
         require(handedBack, "Boosted cart never returned to vanilla on ordinary powered rails");
+        require(cart.getX() < cobbleX + 8, "Too slow to reach vanilla speed: " + (cart.getX() - cobbleX) + " blocks");
+        for (int tick = 0; tick < 20; tick++) {
+            double beforeX = cart.getX();
+            cart.tick();
+            require(cart.getX() - beforeX <= SandstoneRailUtil.VANILLA_MAX_STEP + 1.0E-6D,
+                    "Faster than vanilla powered-rail speed on ordinary powered rails");
+        }
         cart.discard();
         helper.succeed();
     }
 
     @GameTest
-    public void inactivePoweredSandstoneBrakesHard(GameTestHelper helper) {
+    public void sandstoneBrakeIsStrongerThanOrdinaryBrake(GameTestHelper helper) {
         ServerLevel level = helper.getLevel();
         BlockPos origin = helper.absolutePos(new BlockPos(4, 20, 4));
         for (boolean ridden : new boolean[]{false, true}) {
-            List<Cell> track = new ArrayList<>();
-            BlockPos pos = addStraight(track, origin, Direction.EAST, BOOSTERS, Blocks.SANDSTONE,
-                    poweredRail(Direction.EAST, true));
-            pos = addStraight(track, pos, Direction.EAST, 4, Blocks.SANDSTONE, plainRail(Direction.EAST));
-            int brakeX = pos.getX();
-            pos = addStraight(track, pos, Direction.EAST, 3, Blocks.SANDSTONE, poweredRail(Direction.EAST, false));
-            addStraight(track, pos, Direction.EAST, 60, Blocks.SANDSTONE, plainRail(Direction.EAST));
-            build(level, track);
-
-            Minecart cart = cart(helper, level, track.get(0).pos(), Direction.EAST, 0.1D, ridden);
-            for (int tick = 0; tick < 100; tick++) {
-                cart.tick();
-                requireOnRail(level, cart, "brake");
-            }
-            require(cart.getDeltaMovement().horizontalDistanceSqr() == 0.0D, "Brake did not stop the cart");
-            require(cart.getX() < brakeX + 6, "Brake stopped the cart too late: x=" + (cart.getX() - brakeX));
-            cart.discard();
+            double sandstoneStop = brakeStopDistance(helper, level, origin, Blocks.SANDSTONE, ridden);
+            double ordinaryStop = brakeStopDistance(helper, level, origin, Blocks.COBBLESTONE, ridden);
+            require(sandstoneStop < 3.0D, "Sandstone brake too weak: stopped after " + sandstoneStop);
+            require(sandstoneStop + 1.0D < ordinaryStop, "Sandstone brake not stronger than ordinary: sandstone="
+                    + sandstoneStop + " ordinary=" + ordinaryStop + " ridden=" + ridden);
         }
         helper.succeed();
+    }
+
+    /** Distance past the first brake rail where a full-speed cart ends up after 100 ticks. */
+    private static double brakeStopDistance(GameTestHelper helper, ServerLevel level, BlockPos origin,
+                                            Block brakeSupport, boolean ridden) {
+        List<Cell> track = new ArrayList<>();
+        BlockPos pos = addStraight(track, origin, Direction.EAST, BOOSTERS, Blocks.SANDSTONE,
+                poweredRail(Direction.EAST, true));
+        pos = addStraight(track, pos, Direction.EAST, 4, Blocks.SANDSTONE, plainRail(Direction.EAST));
+        int brakeX = pos.getX();
+        pos = addStraight(track, pos, Direction.EAST, 3, brakeSupport, poweredRail(Direction.EAST, false));
+        addStraight(track, pos, Direction.EAST, 80, brakeSupport, plainRail(Direction.EAST));
+        build(level, track);
+
+        Minecart cart = cart(helper, level, track.get(0).pos(), Direction.EAST, 0.1D, ridden);
+        for (int tick = 0; tick < 100; tick++) {
+            cart.tick();
+            requireOnRail(level, cart, "brake on " + brakeSupport);
+        }
+        double distance = cart.getX() - brakeX;
+        cart.discard();
+        return distance;
     }
 
     @GameTest

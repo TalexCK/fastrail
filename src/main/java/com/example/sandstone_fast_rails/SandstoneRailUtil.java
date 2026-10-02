@@ -33,14 +33,27 @@ public final class SandstoneRailUtil {
     /** Energy added per block travelled on an active powered rail on sandstone. */
     public static final double SANDSTONE_POWERED_RAIL_ENERGY = 0.5D;
 
-    /** Speed kept per block travelled on an inactive powered rail on sandstone. */
-    public static final double SANDSTONE_BRAKE_RETENTION = 0.1D;
+    /**
+     * Speed kept per block travelled on an active powered rail NOT on sandstone,
+     * while the cart is faster than vanilla. It slows to vanilla powered-rail
+     * speed within a few blocks, then vanilla takes over.
+     */
+    public static final double POWERED_RAIL_OVERSPEED_RETENTION = 0.5D;
 
-    /** Vanilla brake (x0.5 per tick at 0.4 blocks/tick) expressed per block. */
-    public static final double BRAKE_RETENTION = Math.pow(0.5D, 1.0D / VANILLA_MAX_STEP);
+    /** Strong sandstone brake: speed kept per block on an inactive powered rail on sandstone. */
+    public static final double SANDSTONE_BRAKE_RETENTION = 0.02D;
 
-    /** Vanilla per-tick brake, applied when the tick starts on an inactive powered rail. */
-    public static final double BRAKE_TICK_RETENTION = 0.5D;
+    /** Strong sandstone brake: extra per-tick factor when the tick starts on that rail. */
+    public static final double SANDSTONE_BRAKE_TICK_RETENTION = 0.25D;
+
+    /** A cart on a sandstone brake is stopped below this speed. */
+    public static final double SANDSTONE_BRAKE_STOP_SPEED = 0.05D;
+
+    /**
+     * Mild brake for a boosted cart on an inactive powered rail NOT on sandstone:
+     * speed kept per block. Once at vanilla speed, vanilla's own brake applies.
+     */
+    public static final double BRAKE_RETENTION = 0.5D;
 
     /** Vanilla stops a cart on an inactive powered rail below this speed. */
     public static final double BRAKE_STOP_SPEED = 0.03D;
