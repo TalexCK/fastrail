@@ -1,15 +1,13 @@
 package com.example.sandstone_fast_rails.mixin;
 
+import com.example.sandstone_fast_rails.FastRailCart;
 import com.example.sandstone_fast_rails.SandstoneRailUtil;
-import com.example.sandstone_fast_rails.RailStepState;
-import net.minecraft.world.entity.vehicle.minecart.OldMinecartBehavior;
-import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.PoweredRailBlock;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.vehicle.minecart.Minecart;
+import net.minecraft.world.entity.vehicle.minecart.OldMinecartBehavior;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
@@ -17,529 +15,304 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
+/**
+ * Kinetic-energy rail model.
+ *
+ * A cart on a sandstone rail keeps its own track speed V (up to 2 blocks/tick).
+ * Every tick vanilla moves the cart once; the remaining distance is covered by
+ * extra vanilla moveAlongTrack steps of at most 0.4 blocks, so curves,
+ * junctions and slopes use vanilla geometry at any speed. The steps only move
+ * the cart. Speed changes once per tick from energy:
+ * powered rails add energy per block travelled, climbing trades speed for
+ * height, the vanilla slowdown factor applies per tick, and inactive powered
+ * rails brake. Turning never costs energy.
+ *
+ * After leaving sandstone the cart keeps its energy and slows with vanilla
+ * friction (ordinary rails never speed it up), then hands back to vanilla
+ * once it is at vanilla speed. Ordinary active powered rails slow it to vanilla
+ * powered-rail speed within a few blocks; ordinary inactive powered rails brake
+ * it more gently than sandstone ones. Carts that are not boosted are never touched.
+ */
 @Mixin(Minecart.class)
-public abstract class MinecartMixin implements RailStepState {
-    @Unique private boolean sandstoneFastRails$extraRailStep;
-    @Unique private boolean sandstoneFastRails$reducedCurveFriction;
-    @Unique private boolean sandstoneFastRails$boostMomentum;
+public abstract class MinecartMixin implements FastRailCart {
+    @Unique private boolean sandstoneFastRails$boosted;
+    @Unique private double sandstoneFastRails$speed;
+    @Unique private Vec3 sandstoneFastRails$lastSetMovement = Vec3.ZERO;
+
+    @Unique private boolean sandstoneFastRails$tracking;
+    @Unique private Vec3 sandstoneFastRails$headPos;
+    @Unique private Vec3 sandstoneFastRails$headMovement;
+    @Unique private BlockPos sandstoneFastRails$headRail;
+    @Unique private double sandstoneFastRails$headSpeed;
+
+    @Unique private double sandstoneFastRails$sandstoneDistance;
+    @Unique private double sandstoneFastRails$sandstonePoweredDistance;
+    @Unique private double sandstoneFastRails$poweredDistance;
+    @Unique private double sandstoneFastRails$sandstoneBrakeDistance;
+    @Unique private double sandstoneFastRails$brakeDistance;
 
     @Override
-    public boolean sandstoneFastRails$isExtraRailStep() {
-        return sandstoneFastRails$extraRailStep;
+    public boolean sandstoneFastRails$isBoosted() {
+        return sandstoneFastRails$boosted;
     }
 
     @Override
-    public boolean sandstoneFastRails$hasReducedCurveFriction() {
-        return sandstoneFastRails$reducedCurveFriction;
+    public double sandstoneFastRails$getRailSpeed() {
+        return sandstoneFastRails$speed;
     }
-
-    @Unique
-    private BlockPos sandstoneFastRails$tickStartRailPos = null;
-
-    @Unique
-    private BlockPos sandstoneFastRails$lastRailPos = null;
-
-    @Unique
-    private Direction sandstoneFastRails$lastDirection = null;
 
     @Inject(method = "tick", at = @At("HEAD"))
     private void sandstoneFastRails$tickHead(CallbackInfo ci) {
         Minecart cart = (Minecart) (Object) this;
         Level level = cart.level();
+        sandstoneFastRails$tracking = false;
 
-        sandstoneFastRails$tickStartRailPos = copyPos(
-                SandstoneRailUtil.findRailAtCart(level, cart.blockPosition())
-        );
-        sandstoneFastRails$reducedCurveFriction = level instanceof ServerLevel
-                && cart.getBehavior() instanceof OldMinecartBehavior
-                && !cart.isInWater()
-                && sandstoneFastRails$tickStartRailPos != null
-                && SandstoneRailUtil.isFastRailAt(level, sandstoneFastRails$tickStartRailPos)
-                && SandstoneRailUtil.needsVanillaCurveMovement(level, sandstoneFastRails$tickStartRailPos);
+        if (!(level instanceof ServerLevel)
+                || !(cart.getBehavior() instanceof OldMinecartBehavior)
+                || cart.isInWater()) {
+            sandstoneFastRails$reset();
+            return;
+        }
+
+        BlockPos rail = cart.getCurrentBlockPosOrRailBelow();
+        if (!SandstoneRailUtil.isRailAt(level, rail)) {
+            sandstoneFastRails$reset();
+            return;
+        }
+
+        Vec3 movement = cart.getDeltaMovement();
+        double factor = sandstoneFastRails$movementFactor(cart);
+
+        if (sandstoneFastRails$boosted) {
+            // Something outside the rail tick (entity push, command, other mod)
+            // changed the velocity: scale the track speed by the same ratio.
+            if (movement.distanceToSqr(sandstoneFastRails$lastSetMovement) > 1.0E-12D) {
+                double lastLength = SandstoneRailUtil.horizontalLength(sandstoneFastRails$lastSetMovement);
+                double length = SandstoneRailUtil.horizontalLength(movement);
+                sandstoneFastRails$speed = lastLength > 1.0E-6D
+                        ? sandstoneFastRails$speed * length / lastLength
+                        : length * factor;
+            }
+        } else {
+            if (!SandstoneRailUtil.isFastRailAt(level, rail)) {
+                return; // Pure vanilla.
+            }
+            sandstoneFastRails$boosted = true;
+            sandstoneFastRails$speed = Math.min(
+                    SandstoneRailUtil.horizontalLength(movement) * factor,
+                    SandstoneRailUtil.VANILLA_MAX_STEP);
+        }
+
+        sandstoneFastRails$speed = Math.min(sandstoneFastRails$speed, SandstoneRailUtil.MAX_SPEED);
+        sandstoneFastRails$tracking = true;
+        sandstoneFastRails$headPos = cart.position();
+        sandstoneFastRails$headMovement = movement;
+        sandstoneFastRails$headRail = rail.immutable();
+        sandstoneFastRails$headSpeed = sandstoneFastRails$speed;
     }
 
     @Inject(method = "tick", at = @At("TAIL"))
     private void sandstoneFastRails$tickTail(CallbackInfo ci) {
+        if (!sandstoneFastRails$tracking) {
+            return;
+        }
+        sandstoneFastRails$tracking = false;
+
         Minecart cart = (Minecart) (Object) this;
-        Level level = cart.level();
-
-        if (!(level instanceof ServerLevel)) {
+        if (!(cart.level() instanceof ServerLevel level) || cart.isRemoved() || cart.isInWater()) {
+            sandstoneFastRails$reset();
             return;
         }
 
-        BlockPos currentRailPos = SandstoneRailUtil.findRailAtCart(level, cart.blockPosition());
-
-        if (currentRailPos == null || cart.isInWater()) {
-            sandstoneFastRails$boostMomentum = false;
-            sandstoneFastRails$clearRailHistory();
+        double factor = sandstoneFastRails$movementFactor(cart);
+        double headSpeed = sandstoneFastRails$headSpeed;
+        Vec3 vanillaMovement = cart.getDeltaMovement();
+        double moved = cart.position().distanceTo(sandstoneFastRails$headPos);
+        if (moved > SandstoneRailUtil.TELEPORT_DISTANCE) {
+            sandstoneFastRails$reset();
             return;
         }
 
-        // Ordinary supports always use vanilla friction. Never use the old
-        // sandstone look-ahead/recovery branch while actually on an ordinary rail.
-        if (!SandstoneRailUtil.isFastRailAt(level, currentRailPos)) {
-            sandstoneFastRails$clearRailHistory();
-            if (sandstoneFastRails$boostMomentum) {
-                sandstoneFastRails$applyVanillaRailSteps(cart, (ServerLevel) level);
-            }
-            return;
+        Vec3 direction = SandstoneRailUtil.horizontalDirection(vanillaMovement);
+        if (direction == null) {
+            direction = SandstoneRailUtil.horizontalDirection(sandstoneFastRails$headMovement);
         }
 
-        // Curves AND material boundaries use short vanilla steps. In particular,
-        // do not teleport to the center of the first ordinary rail and discard
-        // the remaining travel distance on the sandstone-to-normal handoff.
-        if (SandstoneRailUtil.needsVanillaCurveMovement(level, sandstoneFastRails$tickStartRailPos)
-                || SandstoneRailUtil.needsVanillaCurveMovement(level, currentRailPos)
-                || SandstoneRailUtil.needsVanillaMaterialHandoff(level, currentRailPos)) {
-            sandstoneFastRails$clearRailHistory();
-            if (sandstoneFastRails$boostMomentum
-                    || SandstoneRailUtil.isFastRailAt(level, currentRailPos)
-                    || sandstoneFastRails$reducedCurveFriction) {
-                sandstoneFastRails$applyVanillaRailSteps(cart, (ServerLevel) level);
-            }
-            return;
-        }
+        sandstoneFastRails$sandstoneDistance = 0.0D;
+        sandstoneFastRails$sandstonePoweredDistance = 0.0D;
+        sandstoneFastRails$poweredDistance = 0.0D;
+        sandstoneFastRails$sandstoneBrakeDistance = 0.0D;
+        sandstoneFastRails$brakeDistance = 0.0D;
+        sandstoneFastRails$recordDistance(level, sandstoneFastRails$headRail, moved);
 
-        if (sandstoneFastRails$tickStartRailPos != null
-                && currentRailPos != null
-                && !sandstoneFastRails$tickStartRailPos.equals(currentRailPos)) {
-            Direction realDirection = SandstoneRailUtil.directionBetween(
-                    sandstoneFastRails$tickStartRailPos,
-                    currentRailPos
-            );
+        boolean collided = cart.horizontalCollision
+                && SandstoneRailUtil.horizontalLength(vanillaMovement) < 1.0E-6D;
+        boolean onTrack = true;
 
-            if (realDirection != null) {
-                sandstoneFastRails$lastDirection = realDirection;
-                sandstoneFastRails$lastRailPos = copyPos(sandstoneFastRails$tickStartRailPos);
-            }
-        }
-
-        BlockPos fastRailPos = SandstoneRailUtil.findFastRailAtCartOrExpected(
-                level,
-                cart.blockPosition(),
-                sandstoneFastRails$lastRailPos,
-                sandstoneFastRails$lastDirection
-        );
-
-        if (fastRailPos == null) {
-            if (currentRailPos != null) {
-                sandstoneFastRails$lastRailPos = copyPos(currentRailPos);
-            }
-
-            return;
-        }
-
-        // The recovery path can predict a rail other than the one under the cart.
-        if (SandstoneRailUtil.needsVanillaCurveMovement(level, fastRailPos)) {
-            sandstoneFastRails$clearRailHistory();
-            sandstoneFastRails$applyVanillaRailSteps(cart, (ServerLevel) level);
-            return;
-        }
-
-        BlockPos previousRailForBoost = sandstoneFastRails$lastRailPos;
-
-        if (sandstoneFastRails$tickStartRailPos != null
-                && !sandstoneFastRails$tickStartRailPos.equals(fastRailPos)) {
-            previousRailForBoost = sandstoneFastRails$tickStartRailPos;
-        }
-
-        sandstoneFastRails$applyRailFollowingBoost(
-                cart,
-                level,
-                fastRailPos,
-                previousRailForBoost
-        );
-        sandstoneFastRails$boostMomentum = SandstoneRailUtil.horizontalSpeed(cart.getDeltaMovement())
-                > SandstoneRailUtil.MIN_MOVEMENT_SPEED;
-    }
-
-    @Unique
-    private void sandstoneFastRails$applyVanillaRailSteps(Minecart cart, ServerLevel level) {
-        if (!(cart.getBehavior() instanceof OldMinecartBehavior)) {
-            sandstoneFastRails$boostMomentum = false;
-            return;
-        }
-        sandstoneFastRails$boostMomentum = true;
-        // The normal tick already moved and applied friction once. Additional
-        // geometry steps must not compound that friction.
-        for (int step = 1; step < (int) SandstoneRailUtil.FAST_RAIL_VISUAL_MULTIPLIER; step++) {
+        // Cover the rest of this tick's distance with vanilla-sized steps.
+        // Each step's speed is set by us, so vanilla friction, slope push and
+        // powered-rail boost inside the step never change the track speed.
+        double budget = Math.min(headSpeed, SandstoneRailUtil.MAX_SPEED) - moved;
+        for (int step = 0; step < SandstoneRailUtil.MAX_SUB_STEPS
+                && !collided && direction != null && budget > 1.0E-4D; step++) {
             BlockPos rail = cart.getCurrentBlockPosOrRailBelow();
             if (!SandstoneRailUtil.isRailAt(level, rail)) {
-                sandstoneFastRails$boostMomentum = false;
+                onTrack = false; // Ran off the end of the track.
                 break;
             }
-            var state = level.getBlockState(rail);
-            if (SandstoneRailUtil.isAscendingRail(level, rail)
-                    || (state.is(Blocks.POWERED_RAIL) && !state.getValue(PoweredRailBlock.POWERED))) {
-                break; // Avoid repeating slope forces or powered-rail braking.
-            }
-            double speed = SandstoneRailUtil.horizontalSpeed(cart.getDeltaMovement());
-            // The stored velocity drives 5 movement steps. Stop only when the
-            // total visible speed is below the near-zero threshold, not while
-            // still travelling at five times that threshold.
-            double stopSpeed = SandstoneRailUtil.MIN_MOVEMENT_SPEED
-                    / SandstoneRailUtil.FAST_RAIL_VISUAL_MULTIPLIER;
-            if (speed <= stopSpeed) {
-                if (!SandstoneRailUtil.isFastRailAt(level, rail)) {
-                    Vec3 stopped = cart.getDeltaMovement();
-                    cart.setDeltaMovement(0.0D, stopped.y, 0.0D);
-                }
-                sandstoneFastRails$boostMomentum = false;
+            if (cart.isInWater()) {
                 break;
             }
-            double stepSpeed = Math.min(speed, SandstoneRailUtil.MAX_STORED_SPEED);
-            Vec3 velocity = cart.getDeltaMovement();
-            cart.setDeltaMovement(velocity.x * stepSpeed / speed, velocity.y, velocity.z * stepSpeed / speed);
-            sandstoneFastRails$extraRailStep = true;
-            try {
-                cart.getBehavior().moveAlongTrack(level);
-            } finally {
-                sandstoneFastRails$extraRailStep = false;
+
+            double stepLength = Math.min(budget, SandstoneRailUtil.VANILLA_MAX_STEP);
+            Vec3 before = cart.position();
+            cart.setDeltaMovement(direction.x * stepLength / factor, 0.0D, direction.z * stepLength / factor);
+            cart.getBehavior().moveAlongTrack(level);
+            if (cart.isRemoved()) {
+                return;
             }
-            // Do not multiply powered-rail acceleration in the extra steps.
+
+            double stepMoved = cart.position().distanceTo(before);
+            sandstoneFastRails$recordDistance(level, rail, stepMoved);
+            budget -= stepMoved;
+
             Vec3 after = cart.getDeltaMovement();
-            double afterSpeed = SandstoneRailUtil.horizontalSpeed(after);
-            if (afterSpeed > stepSpeed) {
-                cart.setDeltaMovement(after.x * stepSpeed / afterSpeed, after.y, after.z * stepSpeed / afterSpeed);
-            }
-            if (cart.horizontalCollision) {
+            if (cart.horizontalCollision && SandstoneRailUtil.horizontalLength(after) < 1.0E-6D) {
+                collided = true;
                 break;
             }
+            Vec3 nextDirection = SandstoneRailUtil.horizontalDirection(after);
+            if (nextDirection != null) {
+                direction = nextDirection;
+            }
+            if (stepMoved < 1.0E-4D) {
+                break; // Stopped by a brake or stuck.
+            }
         }
+
+        double speed = collided || direction == null
+                ? 0.0D
+                : sandstoneFastRails$nextSpeed(cart, level, headSpeed, vanillaMovement, factor);
+
+        if (!onTrack || !SandstoneRailUtil.isRailAt(level, cart.getCurrentBlockPosOrRailBelow())) {
+            // Left the track (rail end): continue with vanilla's off-rail motion.
+            if (direction != null) {
+                double offRail = Math.min(speed, SandstoneRailUtil.VANILLA_MAX_STEP);
+                cart.setDeltaMovement(direction.x * offRail, 0.0D, direction.z * offRail);
+            }
+            sandstoneFastRails$reset();
+            return;
+        }
+
+        Vec3 movement = direction == null
+                ? Vec3.ZERO
+                : direction.scale(Math.min(speed, SandstoneRailUtil.VANILLA_MAX_STEP) / factor);
+        boolean onSandstone = SandstoneRailUtil.isFastRailAt(level, cart.getCurrentBlockPosOrRailBelow());
+
+        if (!onSandstone && speed <= SandstoneRailUtil.VANILLA_MAX_STEP * factor) {
+            // Back at vanilla speed on an ordinary rail: vanilla moves factor * |v|
+            // per tick, so this velocity continues at exactly the same speed.
+            cart.setDeltaMovement(direction == null ? Vec3.ZERO : direction.scale(speed / factor));
+            sandstoneFastRails$reset();
+            return;
+        }
+
+        cart.setDeltaMovement(movement);
+        sandstoneFastRails$lastSetMovement = cart.getDeltaMovement();
+        sandstoneFastRails$speed = speed;
     }
 
+    /** New track speed from this tick's energy changes. */
     @Unique
-    private void sandstoneFastRails$applyRailFollowingBoost(
-            Minecart cart,
-            Level level,
-            BlockPos startRailPos,
-            BlockPos previousRailForBoost
-    ) {
-        Vec3 oldVelocity = cart.getDeltaMovement();
-        double oldSpeed = SandstoneRailUtil.horizontalSpeed(oldVelocity);
+    private double sandstoneFastRails$nextSpeed(Minecart cart, Level level, double headSpeed,
+                                                Vec3 vanillaMovement, double factor) {
+        double energy = 0.5D * headSpeed * headSpeed;
+        energy += sandstoneFastRails$sandstonePoweredDistance * SandstoneRailUtil.SANDSTONE_POWERED_RAIL_ENERGY;
+        energy -= SandstoneRailUtil.GRAVITY * (cart.getY() - sandstoneFastRails$headPos.y);
+        double speed = energy > 0.0D ? Math.sqrt(2.0D * energy) : 0.0D;
 
-        Direction currentDirection = sandstoneFastRails$selectDirection(
-                level,
-                startRailPos,
-                previousRailForBoost,
-                oldVelocity
-        );
+        speed *= cart.getBehavior().getSlowdownFactor();
 
-        if (currentDirection == null) {
-            sandstoneFastRails$lastRailPos = copyPos(startRailPos);
-            return;
+        // Sandstone brake: strong, per block and per tick.
+        BlockPos headRail = sandstoneFastRails$headRail;
+        boolean headOnSandstoneBrake = SandstoneRailUtil.isInactivePoweredRail(level.getBlockState(headRail))
+                && SandstoneRailUtil.isFastRailAt(level, headRail);
+        speed *= Math.pow(SandstoneRailUtil.SANDSTONE_BRAKE_RETENTION, sandstoneFastRails$sandstoneBrakeDistance);
+        if (headOnSandstoneBrake) {
+            speed *= SandstoneRailUtil.SANDSTONE_BRAKE_TICK_RETENTION;
         }
-
-        boolean powered = SandstoneRailUtil.isPoweredRailAt(level, startRailPos);
-
-        double storedSpeedAfterThisTick = sandstoneFastRails$calculateStoredSpeed(
-                powered,
-                oldSpeed
-        );
-
-        if (storedSpeedAfterThisTick <= SandstoneRailUtil.MIN_MOVEMENT_SPEED) {
-            cart.setDeltaMovement(Vec3.ZERO);
-            sandstoneFastRails$lastRailPos = copyPos(startRailPos);
-            sandstoneFastRails$lastDirection = null;
-            return;
-        }
-
-        double targetVisualSpeed = storedSpeedAfterThisTick * SandstoneRailUtil.FAST_RAIL_VISUAL_MULTIPLIER;
-
-        if (targetVisualSpeed > SandstoneRailUtil.FAST_MAX_SPEED) {
-            targetVisualSpeed = SandstoneRailUtil.FAST_MAX_SPEED;
-        }
-
-        if (SandstoneRailUtil.isSlopeAhead(level, startRailPos, currentDirection)) {
-            if (targetVisualSpeed > SandstoneRailUtil.SLOPE_MAX_VISUAL_SPEED) {
-                targetVisualSpeed = SandstoneRailUtil.SLOPE_MAX_VISUAL_SPEED;
-            }
-        }
-
-        double remainingExtraDistance = targetVisualSpeed - oldSpeed;
-
-        if (remainingExtraDistance <= 0.00001D) {
-            Vec3 finalVelocity = SandstoneRailUtil.velocityForRailDirection(
-                    level,
-                    startRailPos,
-                    currentDirection,
-                    storedSpeedAfterThisTick
-            );
-
-            cart.setDeltaMovement(finalVelocity);
-
-            sandstoneFastRails$lastRailPos = copyPos(startRailPos);
-            sandstoneFastRails$lastDirection = currentDirection;
-            return;
-        }
-
-        BlockPos currentRail = startRailPos;
-        BlockPos previousRail = previousRailForBoost;
-
-        int safetyCounter = 5;
-
-        while (remainingExtraDistance > 0.00001D && safetyCounter-- > 0) {
-            BlockPos nextRail = SandstoneRailUtil.findNextConnectedRail(
-                    level,
-                    currentRail,
-                    currentDirection
-            );
-
-            if (nextRail == null) {
-                if (SandstoneRailUtil.isRailEndExitClear(level, currentRail, currentDirection)) {
-                    Vec3 exitPos = SandstoneRailUtil.railExitPosition(currentRail, currentDirection);
-
-                    cart.setPos(exitPos.x, exitPos.y, exitPos.z);
-
-                    cart.setDeltaMovement(SandstoneRailUtil.velocityFromDirection(
-                            currentDirection,
-                            storedSpeedAfterThisTick
-                    ));
-
-                    sandstoneFastRails$lastRailPos = null;
-                    sandstoneFastRails$lastDirection = currentDirection;
-
-                    return;
-                }
-
-                sandstoneFastRails$stopCartAtRail(cart, currentRail);
-                return;
-            }
-
-            /*
-             * 不再检测侧边、上方、下方的其它方块是否“挡住”。
-             * 只要下一节铁轨本身存在，就继续跑。
-             */
-            if (!SandstoneRailUtil.isFastRailAt(level, nextRail)) {
-                Vec3 nextCenter = SandstoneRailUtil.railCenter(nextRail);
-                cart.setPos(nextCenter.x, nextCenter.y, nextCenter.z);
-
-                cart.setDeltaMovement(SandstoneRailUtil.velocityTowardRail(
-                        currentRail,
-                        nextRail,
-                        storedSpeedAfterThisTick
-                ));
-
-                sandstoneFastRails$lastRailPos = copyPos(nextRail);
-                sandstoneFastRails$lastDirection = currentDirection;
-
-                return;
-            }
-
-            boolean slopeSegment = SandstoneRailUtil.isSlopeBetween(currentRail, nextRail)
-                    || SandstoneRailUtil.isAscendingRail(level, currentRail)
-                    || SandstoneRailUtil.isAscendingRail(level, nextRail);
-
-            if (slopeSegment) {
-                double slopeStep = Math.min(remainingExtraDistance, 0.75D);
-
-                Vec3 partialPos = SandstoneRailUtil.railInterpolatedPosition(
-                        currentRail,
-                        nextRail,
-                        slopeStep
-                );
-
-                cart.setPos(partialPos.x, partialPos.y, partialPos.z);
-
-                cart.setDeltaMovement(SandstoneRailUtil.velocityTowardRail(
-                        currentRail,
-                        nextRail,
-                        storedSpeedAfterThisTick
-                ));
-
-                if (slopeStep >= 0.70D) {
-                    previousRail = currentRail;
-                    currentRail = nextRail;
-
-                    Direction nextDirection = SandstoneRailUtil.chooseNextDirection(
-                            level,
-                            currentRail,
-                            previousRail,
-                            SandstoneRailUtil.velocityForRailDirection(
-                                    level,
-                                    currentRail,
-                                    currentDirection,
-                                    targetVisualSpeed
-                            )
-                    );
-
-                    if (nextDirection != null) {
-                        currentDirection = nextDirection;
-                    }
-                }
-
-                remainingExtraDistance = 0.0D;
-            } else if (remainingExtraDistance >= 1.0D) {
-                Vec3 nextCenter = SandstoneRailUtil.railCenter(nextRail);
-                cart.setPos(nextCenter.x, nextCenter.y, nextCenter.z);
-
-                previousRail = currentRail;
-                currentRail = nextRail;
-
-                remainingExtraDistance -= 1.0D;
-
-                Direction nextDirection = SandstoneRailUtil.chooseNextDirection(
-                        level,
-                        currentRail,
-                        previousRail,
-                        SandstoneRailUtil.velocityForRailDirection(
-                                level,
-                                currentRail,
-                                currentDirection,
-                                targetVisualSpeed
-                        )
-                );
-
-                if (nextDirection != null) {
-                    currentDirection = nextDirection;
-                }
-
-                sandstoneFastRails$lastDirection = currentDirection;
-            } else {
-                Vec3 partialPos = SandstoneRailUtil.railInterpolatedPosition(
-                        currentRail,
-                        nextRail,
-                        remainingExtraDistance
-                );
-
-                cart.setPos(partialPos.x, partialPos.y, partialPos.z);
-
-                cart.setDeltaMovement(SandstoneRailUtil.velocityTowardRail(
-                        currentRail,
-                        nextRail,
-                        storedSpeedAfterThisTick
-                ));
-
-                remainingExtraDistance = 0.0D;
-            }
-        }
-
-        cart.setDeltaMovement(SandstoneRailUtil.velocityForRailDirection(
-                level,
-                currentRail,
-                currentDirection,
-                storedSpeedAfterThisTick
-        ));
-
-        sandstoneFastRails$lastRailPos = copyPos(currentRail);
-        sandstoneFastRails$lastDirection = currentDirection;
-    }
-
-    @Unique
-    private double sandstoneFastRails$calculateStoredSpeed(boolean powered, double oldSpeed) {
-        if (powered) {
-            double accelerated = oldSpeed + SandstoneRailUtil.POWERED_FAST_RAIL_ACCELERATION;
-
-            if (accelerated < SandstoneRailUtil.POWERED_FAST_RAIL_MIN_START_SPEED) {
-                accelerated = SandstoneRailUtil.POWERED_FAST_RAIL_MIN_START_SPEED;
-            }
-
-            if (accelerated > SandstoneRailUtil.MAX_STORED_SPEED) {
-                accelerated = SandstoneRailUtil.MAX_STORED_SPEED;
-            }
-
-            return accelerated;
-        }
-
-        double slowed = oldSpeed * SandstoneRailUtil.UNPOWERED_FAST_RAIL_FRICTION_MULTIPLIER
-                - SandstoneRailUtil.UNPOWERED_FAST_RAIL_FIXED_SPEED_LOSS;
-
-        if (slowed <= SandstoneRailUtil.MIN_MOVEMENT_SPEED) {
+        if ((headOnSandstoneBrake || sandstoneFastRails$sandstoneBrakeDistance > 0.0D)
+                && speed < SandstoneRailUtil.SANDSTONE_BRAKE_STOP_SPEED) {
             return 0.0D;
         }
 
-        return slowed;
+        // Ordinary brake on a boosted cart: milder, per block only. At vanilla
+        // speed the cart is handed back and vanilla's own brake applies.
+        speed *= Math.pow(SandstoneRailUtil.BRAKE_RETENTION, sandstoneFastRails$brakeDistance);
+        if (sandstoneFastRails$brakeDistance > 0.0D && speed < SandstoneRailUtil.BRAKE_STOP_SPEED) {
+            return 0.0D;
+        }
+
+        // Ordinary active powered rail: slow an over-speed cart down to vanilla
+        // powered-rail speed, never below it.
+        double vanillaSpeed = SandstoneRailUtil.VANILLA_MAX_STEP * factor;
+        if (sandstoneFastRails$poweredDistance > 0.0D && speed > vanillaSpeed) {
+            speed = Math.max(vanillaSpeed, speed
+                    * Math.pow(SandstoneRailUtil.POWERED_RAIL_OVERSPEED_RETENTION, sandstoneFastRails$poweredDistance));
+        }
+
+        // From (almost) rest, keep vanilla's start-up impulses: player input,
+        // the powered-rail kick off a solid block, entity pushes.
+        if (headSpeed < SandstoneRailUtil.START_SPEED) {
+            speed = Math.max(speed, SandstoneRailUtil.horizontalLength(vanillaMovement) * factor);
+        }
+
+        // Ordinary rails (powered rails, downhill) never speed up a boosted
+        // cart: above vanilla speed it only slows down until vanilla takes over.
+        if (sandstoneFastRails$sandstoneDistance <= 0.0D) {
+            speed = Math.min(speed, headSpeed);
+        }
+
+        speed = Math.min(speed, SandstoneRailUtil.MAX_SPEED);
+        return speed < SandstoneRailUtil.STOP_SPEED ? 0.0D : speed;
     }
 
+    /** Attribute a travelled distance to the rail the movement started on. */
     @Unique
-    private Direction sandstoneFastRails$selectDirection(
-            Level level,
-            BlockPos currentRail,
-            BlockPos previousRail,
-            Vec3 oldVelocity
-    ) {
-        if (previousRail != null && !previousRail.equals(currentRail)) {
-            Direction direction = SandstoneRailUtil.chooseNextDirection(
-                    level,
-                    currentRail,
-                    previousRail,
-                    oldVelocity
-            );
-
-            if (direction != null) {
-                return direction;
+    private void sandstoneFastRails$recordDistance(Level level, BlockPos rail, double distance) {
+        if (distance <= 0.0D || rail == null) {
+            return;
+        }
+        BlockState state = level.getBlockState(rail);
+        boolean sandstone = SandstoneRailUtil.isFastRailAt(level, rail);
+        if (sandstone) {
+            sandstoneFastRails$sandstoneDistance += distance;
+        }
+        if (SandstoneRailUtil.isActivePoweredRail(state)) {
+            if (sandstone) {
+                sandstoneFastRails$sandstonePoweredDistance += distance;
+            } else {
+                sandstoneFastRails$poweredDistance += distance;
+            }
+        } else if (SandstoneRailUtil.isInactivePoweredRail(state)) {
+            if (sandstone) {
+                sandstoneFastRails$sandstoneBrakeDistance += distance;
+            } else {
+                sandstoneFastRails$brakeDistance += distance;
             }
         }
-
-        if (sandstoneFastRails$lastDirection != null
-                && SandstoneRailUtil.isDirectionRailExit(level, currentRail, sandstoneFastRails$lastDirection)) {
-            return sandstoneFastRails$lastDirection;
-        }
-
-        double speed = SandstoneRailUtil.horizontalSpeed(oldVelocity);
-
-        if (speed > 0.0001D) {
-            Direction velocityDirection = SandstoneRailUtil.directionFromVelocity(oldVelocity);
-
-            if (SandstoneRailUtil.isDirectionRailExit(level, currentRail, velocityDirection)) {
-                return velocityDirection;
-            }
-        }
-
-        int connectedCount = 0;
-        Direction onlyConnectedDirection = null;
-
-        for (Direction direction : Direction.Plane.HORIZONTAL) {
-            if (SandstoneRailUtil.isDirectionRailExit(level, currentRail, direction)
-                    && SandstoneRailUtil.hasConnectedRail(level, currentRail, direction)) {
-                connectedCount++;
-                onlyConnectedDirection = direction;
-            }
-        }
-
-        if (connectedCount == 1) {
-            return onlyConnectedDirection;
-        }
-
-        return null;
     }
 
     @Unique
-    private void sandstoneFastRails$clearRailHistory() {
-        sandstoneFastRails$lastRailPos = null;
-        sandstoneFastRails$lastDirection = null;
+    private static double sandstoneFastRails$movementFactor(Minecart cart) {
+        return cart.isVehicle() ? SandstoneRailUtil.RIDDEN_MOVEMENT_FACTOR : 1.0D;
     }
 
     @Unique
-    private void sandstoneFastRails$stopCartAtRail(Minecart cart, BlockPos railPos) {
-        Vec3 center = SandstoneRailUtil.railCenter(railPos);
-
-        cart.setPos(center.x, center.y, center.z);
-        cart.setDeltaMovement(Vec3.ZERO);
-
-        sandstoneFastRails$lastRailPos = copyPos(railPos);
-        sandstoneFastRails$lastDirection = null;
-    }
-
-    @Unique
-    private static BlockPos copyPos(BlockPos pos) {
-        if (pos == null) {
-            return null;
-        }
-
-        return new BlockPos(pos.getX(), pos.getY(), pos.getZ());
+    private void sandstoneFastRails$reset() {
+        sandstoneFastRails$boosted = false;
+        sandstoneFastRails$speed = 0.0D;
+        sandstoneFastRails$lastSetMovement = Vec3.ZERO;
+        sandstoneFastRails$tracking = false;
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-

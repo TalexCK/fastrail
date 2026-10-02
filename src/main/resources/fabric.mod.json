@@ -3,7 +3,7 @@
 	"id": "sandstone_fast_rails",
 	"version": "${version}",
 	"name": "Sandstone Fast Rails",
-	"description": "Minecarts accelerate on sandstone rails, with low-friction curves, vanilla routing, and vanilla friction while coasting onto other support blocks.",
+	"description": "Minecarts on sandstone rails run on a kinetic-energy model: sandstone powered rails charge carts up to 40 blocks/s, curves cost no speed, hills trade speed for height, and carts coast smoothly after leaving sandstone.",
 	"authors": [
 		"You"
 	],
